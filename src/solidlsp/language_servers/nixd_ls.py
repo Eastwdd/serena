@@ -278,6 +278,26 @@ class NixLanguageServer(SolidLanguageServer):
         return flake_path.exists()
 
     @staticmethod
+    def _detect_git_repository(repository_path: str) -> bool:
+        """
+        Detect if the repository is a git repository.
+
+        This is used to determine the appropriate flake reference scheme.
+        Git repositories can use the git+file:// scheme which only reads
+        git-tracked files, avoiding permission issues with untracked files
+        like node-compile-cache, .direnv, node_modules, etc.
+
+        Args:
+            repository_path: Absolute path to the repository root
+
+        Returns:
+            True if .git directory exists at the repository root
+
+        """
+        git_path = Path(repository_path) / ".git"
+        return git_path.exists()
+
+    @staticmethod
     def _build_options_config(repository_path: str, is_flake: bool) -> dict:
         """
         Build the nixd options configuration based on project type.
@@ -293,6 +313,10 @@ class NixLanguageServer(SolidLanguageServer):
         Note: flake-parts is intentionally excluded by default because most
         flakes don't use it, and including it causes errors. Users who use
         flake-parts can configure this manually in their editor settings.
+
+        For git repositories, uses the git+file:// scheme which only reads
+        git-tracked files, avoiding permission issues with untracked files
+        like node_modules, build artifacts, cache directories, etc.
 
         See: https://github.com/nix-community/nixd/blob/main/nixd/docs/configuration.md
 
@@ -318,7 +342,24 @@ class NixLanguageServer(SolidLanguageServer):
             #
             # If flake doesn't have nixosConfigurations, we return an empty attrset
             # to avoid errors. nixd handles this gracefully.
-            flake_let = f"let flake = builtins.getFlake (builtins.toString {repository_path}); "
+            #
+            # IMPORTANT: For git repositories, we use the git+file:// scheme which:
+            # - Only reads files tracked by git (respects .gitignore)
+            # - Avoids permission errors from untracked files (node_modules, caches, etc.)
+            # - Is the recommended way to reference local flakes in a git repo
+            #
+            # For non-git repos, we fall back to the path: scheme.
+            is_git = NixLanguageServer._detect_git_repository(repository_path)
+            if is_git:
+                # git+file:// scheme - only reads git-tracked files
+                # This avoids permission errors when the repository contains
+                # untracked files with restricted permissions (e.g., node-compile-cache)
+                flake_ref = f"git+file://{repository_path}"
+            else:
+                # path: scheme for non-git directories
+                flake_ref = f"path:{repository_path}"
+
+            flake_let = f'let flake = builtins.getFlake "{flake_ref}"; '
 
             # NixOS options expression that safely checks for nixosConfigurations
             # Returns {} if the flake doesn't export nixosConfigurations
